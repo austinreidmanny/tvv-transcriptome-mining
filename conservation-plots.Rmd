@@ -1,0 +1,698 @@
+---
+title: "conservation-plots.Rmd"
+author: "Austin Reid Manny"
+date: "2021-08-20
+output: html_document
+---
+
+```{r}
+library(seqinr)
+library(tidyverse)
+library(modeest)
+```
+
+
+
+```{r Write function for nucleotide conservation analysis}
+
+ntConservation <- function(alignment.fasta,
+                           substitution.matrix,
+                           window.size) {
+  
+  # ========================================================================================
+  # function: ntConservation
+  # ========================================================================================
+  #
+  # ----------------------------------------------------------------------------------------
+  # PURPOSE:
+  # ----------------------------------------------------------------------------------------
+  # This objective of this function is to calculate the rate of nucleotide conservation
+  # across a multiple sequence alignment of related sequences. It is intended for nucleotide
+  # alignments and has been tested primarily with the EDNAFULL substitution matrix. 
+  #
+  # ----------------------------------------------------------------------------------------
+  # INPUT:
+  # ----------------------------------------------------------------------------------------
+  # alignment.fasta : [required]
+  #                   Multiple sequence alignment filename (or path to the file), as a STRING.
+  #                   FASTA needs to have single blank newline at the end, following 
+  #                   the final sequence. If there is not a blank line, the read-in 
+  #                   function from `seqinr` will throw an error and the function will
+  #                   break. 
+  #                   Masked residues are allowed and should represented as "+" characters
+  #                   This allows the function to differentiate between indels ("-") and 
+  #                   merely just missing information (e.g., when using partial sequences).
+  #
+  # ----------------------------------------------------------------------------------------
+  # OPTIONS:
+  # ----------------------------------------------------------------------------------------
+  # substitution.matrix : [required]
+  #                       A MATRIX of scores (in statistics, formally a 'transition matrix').
+  #                       This will be used to score each sample sequence against the 
+  #                       consensus sequence. Row names and column names should be the same.
+  #                       The consensus residues are rows and sample sequences form the columns.
+  #                       This will allow the matrix to be accesssed like this:
+  #
+  #                       consensus nucleotide = "A"
+  #                       observed nucleotide = "C"
+  #                       sub.matrix["A", "C"] = score
+  # 
+  #                       This function has been heavily tested with the EDNAFULL matrix.
+  #                       This is a simple match = +5, mismatch = -4, gap = 0 scoring scheme 
+  #                       with half-scores for ambiguous nucleotides.
+  #
+  # window.size : [optional] 
+  #               An odd INTEGER for setting a sliding window.
+  #               This acts to smooth the scores for a more visually pleasing and simpler plot.
+  #               Provided value must be odd, since the window will be applied half in front,
+  #               and half behind the current position. When including the current position,
+  #               this makes the window an odd number.
+  # 
+  # ----------------------------------------------------------------------------------------
+  # OUTPUT:
+  # ----------------------------------------------------------------------------------------
+  # final.table : The result is a table (tidyverse TIBBLE) containing for each residue 
+  #               in the alignment: Each row is a residue, with the following columns:
+  #               Position, Consensus, Score, WindowScore
+  # ========================================================================================
+  
+  # ----------------------------------------------------------------------------------------
+  # Make sure necessary packages are installed
+  # ----------------------------------------------------------------------------------------
+  require(seqinr)
+  require(tidyverse)
+  require(modeest)
+  
+  # ----------------------------------------------------------------------------------------
+  # Error checking for the window.size parameter
+  # ----------------------------------------------------------------------------------------
+  # If no window.size is provided, set it to 1 (no window)
+  if (missing(window.size)) {
+    window.size <- 1
+  }
+  
+  # Make sure that window.size is an odd number (window must be odd)
+  window.size = as.integer(window.size)
+  if (window.size %% 2 != 1) {
+    stop("ERROR: 'window.size' is not odd. Retry with an odd value")
+  }
+  
+  # ----------------------------------------------------------------------------
+  # Take in the starting nucleotide multiple sequence alignment
+  # ----------------------------------------------------------------------------
+  # Read in the alignment file
+  alignment <- read.alignment(alignment.fasta,
+                              format = "fasta",
+                              forceToLower =  TRUE)
+  
+  # Create alignment matrix
+  alignment.matrix <- consensus(alignment,
+                                method = "profile")
+  
+  # Retrieve length of alignment (number of nucleotides)
+  alignment.length <- ncol(alignment.matrix)
+  
+  # ----------------------------------------------------------------------------
+  # Create a consensus from the alignment matrix
+  # ----------------------------------------------------------------------------
+  # Ignore masked or ambiguous residues
+  #   also, transpose it so that rows are positions, and columns are which nucleotide
+  consensus.matrix <- t(subset(alignment.matrix, 
+                               rownames(alignment.matrix) %in% c("a", "c", "g", "t", "-")))
+
+  # Iterate over alignment.matrix; 
+  #   if theres a nucleotide at that position above 50%, that's the consensus;
+  #   if not, set that position to 'n'; if all positions are masked (rare), set it to NA
+  
+  consensus.table <- tibble(Position = NULL,
+                            Consensus = NULL)
+  
+  for (position in 1:alignment.length) {
+    
+    # Grab all nt counts at that position
+    position.nt.counts <- consensus.matrix[position, ]
+    
+    # If there are no residues (i.e., they're all masked);
+    #   then save this position as NA and move on
+    if (all (position.nt.counts == 0) ) {
+      
+      # Combine the two elements for the result of this position
+      position.result <- tibble(Position = position,
+                                Consensus = NA)
+      
+      # Add this to the growing consensus result
+      consensus.table <- bind_rows(consensus.table,
+                                   position.result)
+      
+      # Go to the next position
+      next
+    }
+    
+    # ------------------------------------------------------------------------------ #
+    # Find the most frequent nucleotide at that position
+    # ------------------------------------------------------------------------------ #
+    #   one problem you might expect: what if two nt have equally high occurence
+    #   e.g., 5 C and 5 G. max() would return '5' but refer to both of them
+    #   however, if they are equally abundant, then they won't both be the majority,
+    #   so it will be fine; it will end up returning an 'n'\
+    # ------------------------------------------------------------------------------ #
+    position.mode.nt <- names(which(position.nt.counts == max(position.nt.counts)))
+    position.mode.count <- max(position.nt.counts)
+    mode.frequency <- position.mode.count / sum(position.nt.counts)
+
+    if (mode.frequency > 0.5) {
+      consensus.nt <- as.character(position.mode.nt)
+    } 
+    
+    else {
+      consensus.nt <- "n"  
+    }
+    
+    # Combine the two elements for the result of this position
+    position.result <- tibble(Position = position,
+                              Consensus = consensus.nt)
+    
+    # Add this to the growing consensus result
+    consensus.table <- bind_rows(consensus.table,
+                                 position.result)
+    
+  }
+
+  # Transform the consensus table to a simple character vector
+  consensus.sequence <- consensus.table$Consensus
+  names(consensus.sequence) <- consensus.table$Position
+  
+  # Make sure that the consensus sequence is the same length as the starting alignment
+  if ( length(consensus.sequence) != alignment.length ){
+    cat("Alignment length: ", alignment.length, "\n")
+    cat("Consensus sequence length:", length(consensus.sequence), "\n")
+    stop("Constructed consensus sequence is not the same length as the input alignment.")
+  }
+
+  # -------------------------------------------------------------------------------------- #
+  # With a consensus sequence constructed, now perform the conservation analysis
+  # -------------------------------------------------------------------------------------- #
+  # Create a results table
+  conservation.table <- tibble(Position = NULL,
+                               Consensus = NULL,
+                               Score = NULL)
+
+  # Create a vector of nucleotides to ignore (score = 0)
+  #ignored.symbols <- c("r", "y", "s", "w", "k", "m", "b", "d", "h", "v", NA)
+  ignored.symbols <- NA
+  
+  # Iterate over each column of the alignment, score all sequences for that position
+  for (position in c(1:alignment.length)) {
+      
+      # Retrieve the nucleotide at that position from the consensus
+      consensus.nt <- consensus.sequence[position]
+      
+        # If the consensus nucleotide is just a masked characer, ignore that position
+        if (consensus.nt %in% ignored.symbols) {
+          # Combine all the elements into the row to add
+          position.result <- tibble(Position = position,
+                                    Consensus = NA,
+                                    Score = NA)
+        
+          # Add this position to the results table
+          conservation.table <- bind_rows(conservation.table,
+                                          position.result)
+          
+          # Go to next position
+          next
+        }
+      
+      # Compute scores, and sum all scores for non-masked characters
+      sequence.matrix <- as.matrix.alignment(alignment)
+      
+      residues <- sequence.matrix[ , position] %>%
+                  as.character()
+      
+      # Create a blank score & blank number of unmasked sequences
+      position.sum <- 0
+      number.seqs <- 0
+      
+      # For all residues in the alignment at that position, score them compared to the consensus
+      for (nt in residues) {
+        
+        #if (nt %in% ignored.symbols) {
+        if (nt %in% c(NA, "+")) {
+          next
+        }
+        
+        # Score each non-masked residue and add it to the score
+        else {
+          
+          number.seqs <- number.seqs + 1
+          position.sum <- position.sum + as.integer(substitution.matrix[consensus.nt, nt])
+        }
+        
+      }
+      
+      # Divide the sum of the per-sequence scores by the number of unmasked sequences
+      position.score <- position.sum / number.seqs
+      
+      # Combine all the elements into the row to add
+      position.result <- tibble(Position = position,
+                                Consensus = consensus.nt,
+                                Score = position.score)
+      
+      # Add this position to the results table
+      conservation.table <- bind_rows(conservation.table,
+                                      position.result)
+    }
+  
+  # -------------------------------------------------------------------------------------------------------
+  # Iterate through results (conservation.table), and compute the average score over the given window size
+  # -------------------------------------------------------------------------------------------------------
+  # Grab the length of the table (number of residues in the alignment)
+  table.length <- conservation.table %>% summarize( n() ) %>% as.integer()
+  
+  # Set up a final results table
+  final.table <- tibble(Position = NULL,
+                        Consensus = NULL,
+                        Score = NULL,
+                        WindowScore = NULL)
+  
+  for (current.position in 1 : table.length)  {
+    
+    # Set up results outputs
+    ## each row in the results will have Position, PositionHasGap, WindowHasGap
+    position.result <- tibble(Position = NA,
+                              Consensus = NA,
+                              Score = NA,
+                              WindowScore = NA)
+    
+    position.result <- position.result %>% 
+                       mutate(Position = current.position,
+                              Consensus = conservation.table %>% 
+                                           filter(Position == current.position) %>% 
+                                           select(Consensus) %>%
+                                           as.character(),
+                              Score = conservation.table %>% 
+                                         filter(Position == current.position) %>% 
+                                         select(Score) %>%
+                                         as.integer() )
+    
+    # ----------------------------------------------------------------------------------------
+    # Set up window sizes
+    # ----------------------------------------------------------------------------------------
+    #  The window is centered on 'current.position', with half going left & half going right
+    #  round down to properly account for current.position being in the middle of the window
+    # ----------------------------------------------------------------------------------------
+    left.window <- floor(window.size / 2)
+    right.window <- floor(window.size / 2 )
+    
+    # At beginning of the alignment, you have to be careful because your window cannot be negative
+    if (current.position <= left.window ) { # <= because a window starting at 0 is still a problem
+      
+      # If too far at the beginning, just manually set the window to start at 1
+
+      # Retrieve the sum of Scores for Positions of (1 through 'current.position' + right.window)
+      window.score.sum <- conservation.table %>% 
+                          filter(Position %in% c( 1 : 
+                                                ( current.position + right.window ) )) %>%
+                          select(Score) %>% 
+                          sum()
+      
+      # Average the window score sum by the length of the window
+      #   we are so close to the beginning of the alignment that the window size is small and we have to adjust
+      window.score <- window.score.sum / length(1 : (current.position + right.window))
+
+        
+     # At end of the alignment, you have to be careful because your window cannot go past the maximum residue
+    } else if ( (current.position + window.size) >= table.length) {
+      
+      # If too far at the end, just manually clip the window & set the window to stop at the end of the alignment
+      
+      # Retrieve the sum of AnyGaps for Positions of (current.position - window.size) through current.position
+      #   row = Position, column = Score
+      window.score.sum <- conservation.table %>% 
+                          filter(Position %in% c(current.position : table.length )) %>%
+                          select(Score) %>% 
+                          sum()
+      
+      # Average the window score sum by the length of the window
+      #   we are so close to the end of the alignment that the window size is small and we have to adjust
+      window.score <- window.score.sum / length( current.position : table.length )
+        
+    # Once you get past the beginning of the alignment (and before you get to the end)
+    #   the window will be half in front of the current position, and half behind the current position
+    } else {
+      
+      # Retrieve the sum of Scores for Positions of 
+      #   [current.position - half the window] through [current.position + half the window]
+      #   by rounding down the half-window using 'floor()' we maintain that window.size is correct 
+      #   when taking into account the current position
+      
+       window.score.sum <- conservation.table %>% 
+                           filter(Position %in% c( (current.position - floor(window.size/2) ) : 
+                                                   (current.position + floor(window.size/2) ))) %>%
+                           select(Score) %>%
+                           sum()
+       
+       # Average the window score sum by the length of the window
+       window.score <- window.score.sum / window.size
+    }
+    
+    # Add the score to the position.result
+    position.result <- position.result %>%
+                       mutate(WindowScore = window.score)
+    
+      
+    # Add the position result to the results table
+    final.table <- bind_rows(final.table,
+                             position.result)
+  }
+  
+  return(final.table)
+  
+}
+
+```
+
+```{r Load-the-scoring-matrices}
+# Load a few different nt substitution scoring matrices for options; we will use EDNAFULL in the end
+
+sub.matrix <- matrix(nrow = 7,
+                     ncol = 7,
+                     byrow = TRUE,
+                     dimnames = list(c("a", "c", "g", "t", "-", "n", "+"), # row names
+                                     c("a", "c", "g", "t", "-", "n", "+")), # column names
+                     data = c( 10,  2,  5,  2,  0,  0,  0,
+                                2, 10,  2,  5,  0,  0,  0,
+                                5,  2, 10,  2,  0,  0,  0,
+                                2,  5,  2, 10,  0,  0,  0,
+                                0,  0,  0,  0, 10,  0,  0,
+                                0,  0,  0,  0,  0, 10,  0,
+                                0,  0,  0,  0,  0,  0, 10 ))
+
+easy.matrix <- matrix(nrow = 7,
+                     ncol = 7,
+                     byrow = TRUE,
+                     dimnames = list(c("a", "c", "g", "t", "-", "n", "+"), # row names
+                                     c("a", "c", "g", "t", "-", "n", "+")), # column names
+                     data = c(  1,  0,  0,  0,  -1,  0,  0,
+                                0,  1,  0,  0,  -1,  0,  0,
+                                0,  0,  1,  0,  -1,  0,  0,
+                                0,  0,  0,  1,  -1,  0,  0,
+                                0,  0,  0,  0,   1,  0,  0,
+                                0,  0,  0,  0,  -1,  1,  0,
+                                0,  0,  0,  0,   0,  0,  0))
+
+ednafull <- matrix(data = c( 5,-4,-4,-4,-4, 1, 1,-4,-4, 1,-4,-1,-1,-1,-2, 0, 0,
+                            -4, 5,-4,-4,-4, 1,-4, 1, 1,-4,-1,-4,-1,-1,-2, 0, 0,
+                            -4,-4, 5,-4, 1,-4, 1,-4, 1,-4,-1,-1,-4,-1,-2, 0, 0,
+                            -4,-4,-4, 5, 1,-4,-4, 1,-4, 1,-1,-1,-1,-4,-2, 0, 0,
+                            -4,-4, 1, 1,-1,-4,-2,-2,-2,-2,-1,-1,-3,-3,-1, 0, 0,
+                             1, 1,-4,-4,-4,-1,-2,-2,-2,-2,-3,-3,-1,-1,-1, 0, 0,
+                             1,-4, 1,-4,-2,-2,-1,-4,-2,-2,-3,-1,-3,-1,-1, 0, 0,
+                            -4, 1,-4, 1,-2,-2,-4,-1,-2,-2,-1,-3,-1,-3,-1, 0, 0,
+                            -4, 1, 1,-4,-2,-2,-2,-2,-1,-4,-1,-3,-3,-1,-1, 0, 0,
+                             1,-4,-4, 1,-2,-2,-2,-2,-4,-1,-3,-1,-1,-3,-1, 0, 0,
+                            -4,-1,-1,-1,-1,-3,-3,-1,-1,-3,-1,-2,-2,-2,-1, 0, 0,
+                            -1,-4,-1,-1,-1,-3,-1,-3,-3,-1,-2,-1,-2,-2,-1, 0, 0,
+                            -1,-1,-4,-1,-3,-1,-3,-1,-3,-1,-2,-2,-1,-2,-1, 0, 0,
+                            -1,-1,-1,-4,-3,-1,-1,-3,-1,-3,-2,-2,-2,-1,-1, 0, 0,
+                            -2,-2,-2,-2,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1, 0, 0,
+                             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 0,
+                             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+                   ncol = 17, nrow = 17,
+                   byrow = TRUE,
+                   dimnames = list(c("a", "t", "g", "c", "s", "w", "r", "y", "k", 
+                                     "m", "b", "v", "h", "d", "n", "-", "+"),
+                                   c("a", "t", "g", "c", "s", "w", "r", "y", "k", 
+                                     "m", "b", "v", "h", "d", "n", "-", "+")
+                                  )
+                   )
+
+```
+
+```{r run-ntConservation-on-TVV1-5}
+# ----------------------------------------------------------------------------------------
+# Determine the rates of nucleotide conservation over the entire sequences of
+# all available TVV sequences (new assemblies plus all NCBI sequences including partials),
+# faceted by TVV species
+# ----------------------------------------------------------------------------------------
+
+# TVV1
+tvv1.genomes.file <- "TVV1-genomes-masked.fasta"
+
+nt.result.tvv1 <- ntConservation(alignment.fasta = tvv1.genomes.file,
+                                 substitution.matrix = ednafull,
+                                 window.size = 15)
+
+# TVV2
+tvv2.genomes.file <- "TVV2-genomes-masked.fasta"
+
+nt.result.tvv2 <- ntConservation(alignment.fasta = tvv2.genomes.file,
+                                 substitution.matrix = ednafull,
+                                 window.size = 15)
+
+# TVV3
+tvv3.genomes.file <- "TVV3-genomes-masked.fasta"
+
+nt.result.tvv3 <- ntConservation(alignment.fasta = tvv3.genomes.file,
+                                 substitution.matrix = ednafull,
+                                 window.size = 15)
+
+# TVV4
+tvv4.genomes.file <- "TVV4-genomes-masked.fasta"
+
+nt.result.tvv4 <- ntConservation(alignment.fasta = tvv4.genomes.file,
+                                 substitution.matrix = ednafull,
+                                 window.size = 15)
+
+# TVV5
+tvv5.genomes.file <- "TVV5-genomes-masked.fasta"
+
+nt.result.tvv5 <- ntConservation(alignment.fasta = tvv5.genomes.file,
+                                 substitution.matrix = ednafull,
+                                 window.size = 15)
+
+```
+
+```{r Determine-number-of-sequences-and-CDS-boundaries}
+# Get number of sequences for each species
+number.tvv1.seqs <- read.alignment(tvv1.genomes.file, format = "fasta")
+number.tvv1.seqs <- number.tvv1.seqs$nam %>% length()
+cat("Number of TVV1 sequences:", number.tvv1.seqs, "\n")
+
+number.tvv2.seqs <- read.alignment(tvv2.genomes.file, format = "fasta")
+number.tvv2.seqs <- number.tvv2.seqs$nam %>% length()
+cat("Number of TVV2 sequences:", number.tvv2.seqs, "\n")
+
+number.tvv3.seqs <- read.alignment(tvv3.genomes.file, format = "fasta")
+number.tvv3.seqs <- number.tvv3.seqs$nam %>% length()
+cat("Number of TVV3 sequences:", number.tvv3.seqs, "\n")
+
+number.tvv4.seqs <- read.alignment(tvv4.genomes.file, format = "fasta")
+number.tvv4.seqs <- number.tvv4.seqs$nam %>% length()
+cat("Number of TVV4 sequences:", number.tvv4.seqs, "\n")
+
+# Note CDS start and stop per species
+tvv1.start <- 336
+tvv1.stop <- 4628
+
+tvv2.start <- 307
+tvv2.stop <- 4622
+
+tvv3.start <- 368
+tvv3.stop <- 4698
+
+tvv4.start <- 339
+tvv4.stop  <- 4783
+
+tvv5.start <- 338
+tvv5.stop <- 4857
+```
+
+```{r plotting}
+
+# Plot the conservation plots for TVV1-4
+tvv1.con.plot <- nt.result.tvv1 %>% ggplot(aes(x = Position,y = WindowScore)) +
+                   geom_line(size = 0.5) + 
+                   theme_classic() +
+                   xlim(1,5000) +
+                   ylim(0,5) +
+                   theme(legend.position = "none",
+                          axis.line = element_blank(),
+                          panel.border = element_rect(size=0.5, fill=NA),
+                          plot.title = element_text(face = "bold", 
+                                                    hjust = 0.5)) +
+                  ggtitle("TVV1 Genome Conservation") +
+                  geom_rect(data = nt.result.tvv1 %>%
+                                   mutate(Start = tvv1.start,
+                                          Stop = tvv1.stop) %>%
+                                   distinct(Start,
+                                            .keep_all=TRUE),
+                            mapping = aes(xmin=Start, xmax=Stop, 
+                                          ymin=-Inf, ymax=Inf),
+                            inherit.aes = FALSE,
+                            fill="gray",
+                            color = NA, 
+                            alpha=0.4)
+
+tvv2.con.plot <- nt.result.tvv2 %>% ggplot(aes(x = Position,y = WindowScore)) +
+                   geom_line(size = 0.5) + 
+                   theme_classic() +
+                   xlim(1,5000) +
+                   ylim(0,5) +
+                   theme(legend.position = "none",
+                          axis.line = element_blank(),
+                          panel.border = element_rect(size=0.5, fill=NA),
+                          plot.title = element_text(face = "bold", 
+                                                    hjust = 0.5)) +
+                  ggtitle("TVV2 Genome Conservation") +
+                  geom_rect(data = nt.result.tvv2 %>%
+                                   mutate(Start = tvv2.start,
+                                          Stop = tvv2.stop) %>%
+                                   distinct(Start,
+                                            .keep_all=TRUE),
+                            mapping = aes(xmin=Start, xmax=Stop, 
+                                          ymin=-Inf, ymax=Inf),
+                            inherit.aes = FALSE,
+                            fill="gray",
+                            color = NA, 
+                            alpha=0.4)
+
+tvv3.con.plot <- nt.result.tvv3 %>% ggplot(aes(x = Position,y = WindowScore)) +
+                   geom_line(size = 0.5) + 
+                   theme_classic() +
+                   xlim(1,5000) +
+                   ylim(0,5) +
+                   theme(legend.position = "none",
+                          axis.line = element_blank(),
+                          panel.border = element_rect(size=0.5, fill=NA),
+                          plot.title = element_text(face = "bold", 
+                                                    hjust = 0.5)) +
+                  ggtitle("TVV3 Genome Conservation") +
+                  geom_rect(data = nt.result.tvv3 %>%
+                                   mutate(Start = tvv3.start,
+                                          Stop = tvv3.stop) %>%
+                                   distinct(Start,
+                                            .keep_all=TRUE),
+                            mapping = aes(xmin=Start, xmax=Stop, 
+                                          ymin=-Inf, ymax=Inf),
+                            inherit.aes = FALSE,
+                            fill="gray",
+                            color = NA, 
+                            alpha=0.4)
+
+tvv4.con.plot <- nt.result.tvv4 %>% ggplot(aes(x = Position,y = WindowScore)) +
+                   geom_line(size = 0.5) + 
+                   theme_classic() +
+                   xlim(1,5000) +
+                   ylim(0,5) +
+                   theme(legend.position = "none",
+                          axis.line = element_blank(),
+                          panel.border = element_rect(size=0.5, fill=NA),
+                          plot.title = element_text(face = "bold", 
+                                                    hjust = 0.5)) +
+                  ggtitle("TVV4 Genome Conservation") +
+                  geom_rect(data = nt.result.tvv4 %>%
+                                   mutate(Start = tvv4.start,
+                                          Stop = tvv4.stop) %>%
+                                   distinct(Start,
+                                            .keep_all=TRUE),
+                            mapping = aes(xmin=Start, xmax=Stop, 
+                                          ymin=-Inf, ymax=Inf),
+                            inherit.aes = FALSE,
+                            fill="gray",
+                            color = NA, 
+                            alpha=0.4)
+
+tvv5.con.plot <- nt.result.tvv5 %>% ggplot(aes(x = Position,y = WindowScore)) +
+                   geom_line(size = 0.5) + 
+                   theme_classic() +
+                   scale_x_continuous(labels = c(1,1000,2000,3000,4000,5000),
+                                    limits = c(1,5100)) +
+                   ylim(0,5) +
+                   theme(legend.position = "none",
+                          axis.line = element_blank(),
+                          panel.border = element_rect(size=0.5, fill=NA),
+                          plot.title = element_text(face = "bold", 
+                                                    hjust = 0.5)) +
+                  ggtitle("TVV5 Genome Conservation") +
+                  geom_rect(data = nt.result.tvv5 %>%
+                                   mutate(Start = tvv5.start,
+                                          Stop = tvv5.stop) %>%
+                                   distinct(Start,
+                                            .keep_all=TRUE),
+                            mapping = aes(xmin=Start, xmax=Stop, 
+                                          ymin=-Inf, ymax=Inf),
+                            inherit.aes = FALSE,
+                            fill="gray",
+                            color = NA, 
+                            alpha=0.4)
+
+# Show the plots
+tvv1.con.plot
+tvv2.con.plot
+tvv3.con.plot
+tvv4.con.plot
+tvv5.con.plot
+```
+
+```{r save the final conservation plots plot, eval=FALSE}
+library(svglite)
+
+# TVV1
+ggsave(
+  "TVV1 conservation plot.jpeg",
+  plot = tvv1.con.plot,
+  device = "jpeg",
+  scale = 1,
+  width = 8.5,
+  height = 4.25,
+  units = "in",
+  dpi = 300)
+
+# TVV2
+ggsave(
+  "TVV2 conservation plot.jpeg",
+  plot = tvv2.con.plot,
+  device = "jpeg",
+  scale = 1,
+  width = 8.5,
+  height = 4.25,
+  units = "in",
+  dpi = 300)
+
+# TVV4
+ggsave(
+  "TVV3 conservation plot.jpeg",
+  plot = tvv3.con.plot,
+  device = "jpeg",
+  scale = 1,
+  width = 8.5,
+  height = 4.25,
+  units = "in",
+  dpi = 300)
+
+# TVV4
+ggsave(
+  "TVV4 conservation plot.jpeg",
+  plot = tvv4.con.plot,
+  device = "jpeg",
+  scale = 1,
+  width = 8.5,
+  height = 4.25,
+  units = "in",
+  dpi = 300)
+
+
+# TVV5
+ggsave(
+  "TVV5 conservation plot.jpeg",
+  plot = tvv5.con.plot,
+  device = "jpeg",
+  scale = 1,
+  width = 8.5,
+  height = 4.25,
+  units = "in",
+  dpi = 300)
+
+```
+
+

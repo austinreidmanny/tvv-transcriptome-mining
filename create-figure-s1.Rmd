@@ -1,0 +1,66 @@
+---
+title: "Figure S1"
+author: "Austin Reid Manny"
+date: "2021-04-11"
+output: pdf_notebook
+---
+
+```{r Load-libraries}
+# Load packages
+library("tidyverse")
+library("dplyr")
+library("ggplot2")
+library("gridExtra")
+library("scales")
+library("readr")
+library("ggpmisc")
+library("readxl")
+```
+
+```{r Genome-length-vs-Sequencing}
+# Load genome lengths & sequencing-related data for TVV1-4
+tvv.data <- readxl::read_excel("../TVV1-5/TVV1-5_genome-length-vs-median-mapped-reads.xlsx")
+
+# Plot length vs median-depth 
+plot.length.vs.mediandepth <- tvv.data %>% ggplot(aes(x=Length, y=MedianDepth, col=Species)) +
+                                           geom_point(size=2.5) +
+                                           theme_classic() +
+                                           theme(axis.line = element_blank(),
+                                                 panel.border = element_rect(size=0.5, fill=NA)) +
+                                           ggtitle("TVV Assembly Length vs. Median Depth") +
+                                           theme(plot.title = element_text(hjust = 0.5,
+                                                                           face = "bold")) +
+                                           scale_y_log10(limits = c(1,1000),
+                                                         labels = c(1, 10, 100, 1000),
+                                                         breaks = c(1, 10, 100, 1000)) +
+                                           xlab("sequence length") +
+                                           ylab("median depth") +
+                                           geom_smooth(method = 'lm',
+                                                       se = FALSE,
+                                                       mapping = aes(group = 1),
+                                                       color = "#55565B", size = 0.5) +
+                                           stat_poly_eq(formula = y ~ x,
+                                                        aes(group = 1,
+                                                            label = paste(..p.value.label..,
+                                                                          ..rr.label.., 
+                                                                          sep = "~~~")), 
+                                                        parse = TRUE)
+
+
+# plot it
+plot.length.vs.mediandepth
+
+```
+
+```{r save-figure}
+ggsave(
+  "Figure-S1.jpeg",
+  plot = plot.length.vs.mediandepth,
+  device = "jpeg",
+  scale = 1,
+  width = 8,
+  height = 4.5,
+  units = "in",
+  dpi = 300)
+
+```

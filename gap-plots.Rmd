@@ -1,0 +1,709 @@
+---
+title: "gap-plots"
+author: "Austin Reid Manny"
+date: "2021-08-20"
+output: pdf_document
+---
+
+# Objective
+This file contains the final code used to generate gap plots for Trichomonas vaginalis viruses. These plots delineate the insertion-deletion events across the genomes of TVV. Looking at one species at a time, these plots demonstrate that insertion-deletion events are very prevalent within the 5'- and 3'-UTRs but are nonexistent in the coding regions.
+
+The development of this code can be found in the the 'gap-plots-development.Rmd' file.
+
+```{r libraries, echo=FALSE, warnings=TRUE}
+library("tidyverse")
+library("msa")
+library("gghighlight")
+library("ggrepel")
+library("gridExtra")
+library("svglite")
+```
+
+# Gap functions
+
+I wrote four functions to, respectively, load a multiple sequence alignment, find the gaps, analyze the gaps, and plot the gaps.
+  * gapLoader()
+  * gapFinder()
+  * gapAnalyzer()
+  * gapPlotter()
+
+```{r write the gapLoader() function}
+
+# Write a function to load the multiple sequence alignment for which to analyze gaps
+gapLoader <- function(alignment.file) {
+  
+  # Read in alignment file
+  alignment <- readDNAStringSet(file = alignment.file, 
+                                format = "fasta")
+  
+  # Determine length of the sequences in the multiple sequence alignment
+  alignment.lengths <- fasta.seqlengths(alignment.file)
+  
+  # Check alignment to make sure all genomes are the same length
+   if (min(alignment.lengths) != max(alignment.lengths)) {
+     print("ERROR: Sequences in alignment are not all the same length.")
+     print("This could indicate a faulty alignment. Please check input alignment and try again.")
+     print("NOTE: white space (spaces and line-breaks) count toward the length.")
+     print("Make sure to eliminate these or be consistent in their usage.")
+     stop("Sequence lengths not consistent")
+   }
+  
+  # Tell the user that it worked successfully
+  print("Input alignment successfully loaded!")
+  
+  # Return the alignment object & the alignment lengths
+  return( list( alignment, 
+                alignment.lengths ))
+   
+}
+
+```
+
+```{r write gapFinder() function}
+
+# ------------------------------------------------------------------------------
+# Create the function 'gapFinder()'
+# ------------------------------------------------------------------------------
+# This will take in a multiple sequence alignment object from library `msa`
+# gapFinder will create an empty parallel data.frame
+# It will iterate through each position in each sequence
+# If that residue is not a gap (i.e, it is a nt/ amino acid), it will return a 0
+# If that position (residue) is a gap, it will return a 1 for that position
+# If that position is masked as a "+" (i.e., it is just missing because the 
+# sequence is truncated), it will return a 2 for that position
+# The end result is a tibble (dplyr equivalent of data.frame) with 
+# rows = sequences, columns = positions of residues(0), gaps(1), or masked(2)
+# ------------------------------------------------------------------------------
+
+gapFinder <- function(alignment, 
+                      sequence.lengths){
+  
+  # Start by generating an empty matrix with number of rows = number of samples
+  #   and number of columns = length of longest sequence (should all be same because MSA)
+  gaps.result <- matrix(nrow = length(alignment), 
+                        ncol = max(sequence.lengths))
+  row.names(gaps.result) <- names(alignment)
+  colnames(gaps.result) <- c(1 : max(sequence.lengths))
+  
+  # For each sequence in the multiple sequence alignment
+  for (sequence in names(alignment)){
+   
+    # For each residue in that sequence
+    for (position in c(1:as.integer(sequence.lengths[sequence]))) {
+      
+      # Determine if that position is a gap, missing/truncated sequence, or a true residue (nt/aa)
+      if (as.character(subseq(alignment[sequence],start = position, end = position)) == "-"){
+        
+        ## If gap, map that position number as 1
+        gaps.result[sequence, position] <- 1
+      }
+      
+      # Else, if  the position is masked (it's just a missing sequence at the ends), return a 2
+      else if (as.character(subseq(alignment[sequence],start = position, end = position)) == "+") {
+        gaps.result[sequence, position] <- 2
+      }
+      
+      # If an actual residue (and not a gap), map that position number as 0
+      else {
+        gaps.result[sequence, position] <- 0
+      }
+      
+      # Done with all residues in that sequence! Exit the residue loop & move onto next sample
+    }
+    
+  }
+  
+  # Convert the results matrix into a data.frame
+  gaps.df <- as.data.frame(gaps.result)
+  
+  # Transform the wide results df into a long tidy table
+  gaps.table <- gaps.df %>% 
+                tibble::rownames_to_column(var = "Virus") %>%
+                pivot_longer(cols = -Virus,
+                             names_to = "Position", 
+                             values_to = "Gap") %>%
+                mutate(Position = as.integer(Position),
+                       Gap = as.integer(Gap))
+
+  # Return the gaps.table as the final output of the function
+  return(gaps.table) 
+}
+
+```
+
+```{r write gapAnalyzer() function}
+
+# ------------------------------------------------------------------------------
+# Create the function 'gapAnalyzer()'
+# ------------------------------------------------------------------------------
+#   This will take in a 'gaps.table' (dplyr tibble object) from  gapFinder() and
+#   summarize it by position -- instead of showing every virus strain, it will
+#   show if there is a gap in any strain at that alignment position. Then, it will
+#   iterate through all the positions using a window to detect any gaps not only
+#   at that discrete position, but also any gaps around that position.
+#
+#   This windowed approach will provide a smoothed step figure when plotted.
+# 
+#   Input: 'gaps.table' from gapFinder() [as a dplyr tibble], 
+#          'window.size' parameter, an odd-numbered integer (no even numbers)
+#
+#   Output: 'analyzed.table' [as a dplyr tibble]
+# ------------------------------------------------------------------------------
+
+# Write the function
+
+gapAnalyzer <- function(gaps.table, window.size) {
+  
+  # ----------------------------------------------------------------------------
+  # Error checking for the window.size parameter
+  # ----------------------------------------------------------------------------
+  
+  # Make sure that window.size is an odd number (window must be odd)
+  window.size = as.integer(window.size)
+  if (window.size %% 2 != 1) {
+    stop("ERROR: 'window.size' is not odd. Retry with an odd value")
+  }
+  
+  # ----------------------------------------------------------------------------
+  # Prepare the 'gaps.table' for analysis
+  # ----------------------------------------------------------------------------
+  
+  # Take in the gaps.table and evaluate which positions have gaps
+  gaps.table.summarized <- gaps.table %>%
+                           group_by(Position) %>%
+                           summarize(NumberGaps = sum(Gap == 1),
+                                     NumberNonGaps = sum(Gap == 0),
+                                     NumberMasked = sum(Gap == 2),
+                                     TotalSeqs = n() )
+                           
+  gaps.table.summarized <- gaps.table.summarized %>%
+                           mutate(AnyGaps = (NumberGaps > 0) * 1) # multiply by 1 --> TRUE/FALSE to 1/0
+
+  # ----------------------------------------------------------------------------
+  # Prepare the final output table, 'analysis.result'
+  # ----------------------------------------------------------------------------
+  # To save the results, generate an empty matrix with 
+  #   number of rows = number of positions in alignment,
+  #   number of columns = 3 (Position, PositionHasGap, WindowHasGap)
+  # ----------------------------------------------------------------------------
+
+  # Determine the length of the alignment
+  alignment.length <- as.integer(summarize(gaps.table.summarized, max(Position)))
+
+  # Create output matrix
+  analysis.result <- tibble(Position = NULL,
+                            PositionHasGap = NULL,
+                            WindowHasGap = NULL )
+  
+  # ----------------------------------------------------------------------------
+  # Iterate through the summarized table with a window to show which areas of 
+  #   the alignment have gaps
+  #
+  #   Algorithm: sum AnyGaps for each window; if the sum is greater than 0, 
+  #              that means there is a gap for at least one position in the window
+  # ----------------------------------------------------------------------------
+
+  # Iterate through the alignment; if window has no gaps, WindowGaps = 0; otherwise; WindowGaps = 1
+  for (current.position in (1 : alignment.length )) {
+    
+    # Each row in the results will have Position, PositionHasGap, WindowHasGap
+    position.result <- tibble(Position = NA,
+                              PositionHasGap = NA,
+                              WindowHasGap = NA)
+    
+    position.result <- position.result %>% 
+                       mutate(Position = current.position,
+                              PositionHasGap = gaps.table.summarized %>% 
+                                               filter( Position == current.position ) %>% 
+                                               select( AnyGaps ) %>%
+                                               as.integer())
+    
+    # Set up window sizes
+    #   the window is centered on 'current.position', with half going left & half going right
+    #   round down to properly account for current.position being in the middle of the window
+    window.size <- window.size
+    left.window <- floor(window.size / 2)
+    right.window <- floor(window.size / 2 )
+    
+    # At beginning of the alignment, you have to be careful because your window cannot be negative
+    if (current.position <= left.window ) { # <= because a window starting at 0 is still a problem
+      
+      # If too far at the beginning, just manually set the window to start at 1
+
+      # Retrieve the sum of AnyGaps for Positions of (1 through 'current.position' + right.window)
+      #   row = Position, column = AnyGaps
+      window.gap.sum <- gaps.table.summarized %>% 
+                        filter(Position %in% c( 1 : 
+                                              ( current.position + right.window ) )) %>%
+                        select(AnyGaps) %>% 
+                        sum()
+      
+     # At end of the alignment, you have to be careful because your window cannot go past the maximum residue
+    } else if ( (current.position + window.size) >= alignment.length) {
+      
+      # If too far at the end, just manually clip the window & set the window to stop at the end of the alignment
+      
+      # Retrieve the sum of AnyGaps for Positions of (current.position - window.size) through current.position
+      #   row = Position, column = AnyGaps
+      window.gap.sum <- gaps.table.summarized %>% 
+                        filter(Position %in% c(current.position : alignment.length )) %>%
+                        select(AnyGaps) %>% 
+                        sum()
+        
+    # Once you get past the beginning of the alignment (and before you get to the end)
+    #   the window will be half in front of the current position, and half behind the current position
+    } else {
+      
+      # Retrieve the sum of AnyGaps for Positions of [current.position - half the window] through [current.position + half the window]
+      #   by rounding down the half-window using 'floor()' we maintain that window.size is correct 
+      #   when taking into account the current position
+      
+       window.gap.sum <- gaps.table.summarized %>% 
+                         filter(Position %in% c( (current.position - floor(window.size/2) ) : 
+                                                 (current.position + floor(window.size/2) ))) %>%
+                         select(AnyGaps) %>%
+                         sum()
+    }
+    
+      # If there is a gap in the window, return 1
+      if ( window.gap.sum != 0 ) {
+        #analysis.result[ current.position, "WindowHasGap" ] <- 1
+        position.result <- position.result %>% mutate( WindowHasGap = as.integer(1) )
+        
+      # If there is no gap in the window, return 0  
+      } else if ( window.gap.sum == 0 ) {
+        #analysis.result[ current.position, "WindowHasGap" ] <- 0
+        position.result <- position.result %>% mutate( WindowHasGap = as.integer(0) )
+
+      # Otherewise, if there is some weird result that shouldn't be possible, then just exit  
+      } else {
+        stop("ERROR: Unknown error when interating through 'gaps.table.summarized' with window")
+      }
+    
+    # Add this position's result to the growing cumulative results table
+    analysis.result <- bind_rows(analysis.result,
+                                 position.result)
+    
+    # Go onto the next position
+    }
+  
+  # All positions have been analyzed; give the user the results table
+  return(analysis.result)
+}
+  
+```
+
+```{r write gapPlotter() function}
+
+# ==========================================================================================
+# OBJECTIVE
+# ==========================================================================================
+# This function can be used to generate nice plots for individual gap plots per TVV species
+#   However, in this end, I decided to generate a single faceted plot containing all 
+#   TVV sequences, with each species as a subplot
+# ==========================================================================================
+
+# Write the gapPlotter() function
+gapPlotter <- function(analysis.result, 
+                       plot.name,
+                       plot.color,
+                       line.width,
+                       position.numbering,
+                       cds.start,
+                       cds.stop) {
+  
+  # If no plot title is given, just make it empty
+  if ( missing(plot.name) ) {
+    plot.name = NULL
+    plot.title.formatting = element_blank()
+  } else {
+    plot.name = plot.name
+    plot.title.formatting = element_text(color = plot.color)
+  }
+
+  # If no plot color is given, default back to black
+  if ( missing(plot.color) ) {
+    plot.color = "black"
+  }
+  
+    # If no line width is given, default to 0.5
+  if ( missing(line.width) ) {
+    line.width = 0.5
+  }
+  
+  # If no 'position.numbering' is given, default to TRUE
+  if ( missing(position.numbering) ) {
+    position.numbering = TRUE
+  }
+  
+  # If position.numbering = FALSE, then hide the alignment positions; if TRUE, show them
+  #   if 'position.numbering' is hidden, then also hide the x-axis name & x-axis ticks
+  #   note: x-axis name and ticks are altered, not eliminated, for vertical spacing 
+  if (position.numbering == TRUE) {
+    
+    plot.labels <-   c(1,    "", "", "", "",  500, "", "", "", "",
+                       1000, "", "", "", "", 1500, "", "", "", "",
+                       2000, "", "", "", "", 2500, "", "", "", "",
+                       3000, "", "", "", "", 3500, "", "", "", "",
+                       4000, "", "", "", "", 4500, "", "", "", "")
+    
+    x.axis.name <- "Alignment position"
+    tick.color <- "black"
+
+  } else if (position.numbering == FALSE) {
+    
+    plot.labels <- c(   1, "", "", "", "",  500, "", "", "", "",
+                     1000, "", "", "", "", 1500, "", "", "", "",
+                     2000, "", "", "", "", 2500, "", "", "", "",
+                     3000, "", "", "", "", 3500, "", "", "", "",
+                     4000, "", "", "", "", 4500, "", "", "", "")
+    x.axis.name <- ""
+    tick.color <- "white"
+
+  }
+  
+  # Optional: shaded rectangle based on start and stop of coding sequence
+  if (missing (cds.start) || missing (cds.stop)) {
+    cds.start <- 0
+    cds.stop <- 0
+  }
+  
+  # Create plot  
+  gap.plot <- analysis.result %>% 
+               ggplot(aes(x = Position,
+                          y = WindowHasGap)) +
+               geom_line(size = line.width, 
+                         color = plot.color) +
+               theme_classic() +
+               theme(legend.position = "none",
+                     axis.line = element_blank(),
+                     panel.border = element_rect(size=0.5, fill=NA),
+                     plot.title = plot.title.formatting,
+                     plot.title.position = "panel",
+                     axis.text.x = element_text(color = tick.color, angle = 45, 
+                                                vjust = 1, hjust=1,),
+                     axis.ticks.x = element_line(color = tick.color)) +
+               ggtitle(plot.name) +
+               scale_y_continuous(expand = expansion(mult = c(0.1, 0.2)),
+                                  name = NULL,
+                                  limits = c(0.00, 1.00),
+                                  labels = c("NoGap", "Gap"),
+                                  breaks = c(0,1)) +
+               scale_x_continuous(expand = expansion(mult = c(0.010,0.025)),
+                                  name = x.axis.name,
+                                  breaks = seq(from = 1,
+                                               to = 5000,
+                                               by = 100),
+                                  labels = plot.labels,
+                                  limits = c(1,NA)) +
+               annotate("rect", alpha = 0.2,
+                        xmin = cds.start, xmax = cds.stop,
+                        ymin = -Inf, ymax = Inf)
+
+  # Return the plot
+  return(gap.plot)
+
+}
+
+```
+
+
+## Run the analyses for each TVV again
+```{r analyze gaps in TVV1}
+# Load TVV1 data
+tvv1.data <- gapLoader(alignment.file = "TVV1-genomes-masked.fasta")
+
+# Process the gapLoader() results
+tvv1.alignment <- tvv1.data[[1]]
+tvv1.lengths <- tvv1.data[[2]]
+
+# Take in the TVV1 data and find the gaps
+tvv1.table <- gapFinder(alignment = tvv1.alignment,
+                        sequence.lengths = tvv1.lengths)
+
+# Analyze the gaps
+tvv1.analysis <- gapAnalyzer(gaps.table = tvv1.table, 
+                             window.size = 1)
+
+```
+
+```{r analyze gaps in TVV2}
+# Load TVV2 data
+tvv2.data <- 
+  gapLoader(alignment.file = "TVV2-genomes-masked.fasta")
+
+# Process the gapLoader() results
+tvv2.alignment <- tvv2.data[[1]]
+tvv2.lengths <- tvv2.data[[2]] 
+
+# Take in the TVV2 data and find the gaps
+tvv2.table <- gapFinder(alignment = tvv2.alignment,
+                        sequence.lengths = tvv2.lengths)
+
+# Analyze the gaps
+tvv2.analysis <- gapAnalyzer(gaps.table = tvv2.table, 
+                             window.size = 1)
+
+```
+
+```{r analyze gaps in TVV3}
+# Load TVV3 data
+tvv3.data <- 
+  gapLoader(alignment.file = "TVV3-genomes-masked.fasta")
+
+# Process the gapLoader() results
+tvv3.alignment <- tvv3.data[[1]]
+tvv3.lengths <- tvv3.data[[2]]
+
+# Take in the TVV3 data and find the gaps
+tvv3.table <- gapFinder(alignment = tvv3.alignment,
+                        sequence.lengths = tvv3.lengths)
+
+# Analyze the gaps
+tvv3.analysis <- gapAnalyzer(gaps.table = tvv3.table, 
+                             window.size = 1)
+```
+
+```{r analyze gaps in TVV4}
+# Load TVV4 data
+tvv4.data <- 
+  gapLoader(alignment.file = "TVV4-genomes-masked.fasta")
+
+# Process the gapLoader() results
+tvv4.alignment <- tvv4.data[[1]]
+tvv4.lengths <- tvv4.data[[2]]
+
+# Take in the TVV4 data and find the gaps
+tvv4.table <- gapFinder(alignment = tvv4.alignment,
+                        sequence.lengths = tvv4.lengths)
+
+# Analyze the gaps
+tvv4.analysis <- gapAnalyzer(gaps.table = tvv4.table, 
+                             window.size = 1)
+```
+
+```{r analyze gaps in TVV5}
+# Load TVV1 data
+tvv5.data <- 
+  gapLoader(alignment.file = "TVV5-genomes-masked.fasta")
+  
+# Process the gapLoader() results
+tvv5.alignment <- tvv5.data[[1]]
+tvv5.lengths <- tvv5.data[[2]]
+
+# Take in the TVV1 data and find the gaps
+tvv5.table <- gapFinder(alignment = tvv5.alignment,
+                        sequence.lengths = tvv5.lengths)
+
+# Analyze the gaps
+tvv5.analysis <- gapAnalyzer(gaps.table = tvv5.table, 
+                             window.size = 1)
+```
+
+```{r plot TVV1-5 (new plus all NCBI) gaps using faceting}
+
+# ==============================================================================
+# Retrieve number of virus strains for each species
+# ==============================================================================
+tvv1.table %>% 
+  distinct(Virus) %>% 
+  summarize(n())
+
+tvv2.table %>% 
+  distinct(Virus) %>% 
+  summarize(n())
+
+tvv3.table %>% 
+  distinct(Virus) %>% 
+  summarize(n())
+
+tvv4.table %>% 
+  distinct(Virus) %>% 
+  summarize(n())
+
+tvv5.table %>% 
+  distinct(Virus) %>% 
+  summarize(n())
+
+# ==============================================================================
+# Add species names for all gap tables, to be used for faceting; 
+#   also add in the number of seqs so we can display that on the final plot
+# ==============================================================================
+
+tvv1.analysis.with.names <- tvv1.analysis %>%
+                            mutate(Species = "TVV1 (n=49)",
+                                   cds.start = 336,
+                                   cds.stop = 4628)
+
+tvv2.analysis.with.names <- tvv2.analysis %>%
+                            mutate(Species = "TVV2 (n=36)",
+                                   cds.start = 307,
+                                   cds.stop = 4622)
+
+tvv3.analysis.with.names <- tvv3.analysis %>%
+                            mutate(Species = "TVV3 (n=37)",
+                                   cds.start = 368,
+                                   cds.stop = 4698)
+
+tvv4.analysis.with.names <- tvv4.analysis %>%
+                            mutate(Species = "TVV4 (n=11)",
+                                   cds.start = 339,
+                                   cds.stop = 4783)
+
+tvv5.analysis.with.names <- tvv5.analysis %>%
+                            mutate(Species = "TVV5 (n=6)",
+                                   cds.start = 338,
+                                   cds.stop = 4857)
+
+# ==============================================================================
+# Determine the nearest gaps to the CDS
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# TVV1
+# ------------------------------------------------------------------------------
+#   identify the gap nearest the coding sequence start
+tvv1.analysis.with.names %>% 
+  filter(PositionHasGap == 1, Position < 336) %>% 
+  summarize(max(Position)) %>% as.integer()
+
+#   identify the gap nearest the coding sequence stop
+tvv1.analysis.with.names %>% 
+  filter(PositionHasGap == 1, Position > 4628) %>% 
+  summarize(min(Position)) %>% as.integer()
+
+# ------------------------------------------------------------------------------
+# TVV2
+# ------------------------------------------------------------------------------
+#   identify the gap nearest the coding sequence start
+tvv2.analysis.with.names %>% 
+  filter(PositionHasGap == 1, Position < 307) %>% 
+   summarize(max(Position)) %>% as.integer()
+
+#   identify the gap nearest the coding sequence stop
+tvv2.analysis.with.names %>% 
+  filter(PositionHasGap == 1, Position > 4622) %>% 
+   summarize(min(Position)) %>% as.integer()
+# ------------------------------------------------------------------------------
+
+# ------------------------------------------------------------------------------
+# TVV3
+# ------------------------------------------------------------------------------
+#   identify the gap nearest the coding sequence start
+tvv3.analysis.with.names %>% 
+  filter(PositionHasGap == 1, Position < 368) %>% 
+   summarize(max(Position)) %>% as.integer()
+
+#   identify the gap nearest the coding sequence stop
+tvv3.analysis.with.names %>% 
+  filter(PositionHasGap == 1, Position > 4698) %>% 
+   summarize(min(Position)) %>% as.integer()
+
+# ------------------------------------------------------------------------------
+# TVV4
+# ------------------------------------------------------------------------------
+#   identify the gap nearest the coding sequence start
+tvv4.analysis.with.names %>% 
+  filter(PositionHasGap == 1, Position < 339) %>% 
+   summarize(max(Position)) %>% as.integer()
+
+#   identify the gap nearest the coding sequence stop
+tvv4.analysis.with.names %>% 
+  filter(PositionHasGap == 1, Position > 4783) %>% 
+   summarize(min(Position)) %>% as.integer()
+# ------------------------------------------------------------------------------
+
+# ------------------------------------------------------------------------------
+# TVV5
+# ------------------------------------------------------------------------------
+#   identify the gap nearest the coding sequence start
+tvv5.analysis.with.names %>% 
+  filter(PositionHasGap == 1, Position < 338 ) %>% 
+   summarize(max(Position)) %>% as.integer()
+
+#   identify the gap nearest the coding sequence stop
+tvv5.analysis.with.names %>% 
+  filter(PositionHasGap == 1, Position > 4857 ) %>% 
+   summarize(min(Position)) %>% as.integer()
+# ------------------------------------------------------------------------------
+
+# ==============================================================================
+# Create a single table with all TVV samples so I can plot them together
+# ==============================================================================
+tvv_all.analysis.with.names <- bind_rows(tvv1.analysis.with.names,
+                                         tvv2.analysis.with.names,
+                                         tvv3.analysis.with.names,
+                                         tvv4.analysis.with.names,
+                                         tvv5.analysis.with.names)
+
+# ==============================================================================                  
+# Plot all TVV1-5 gap plots together, but facet them by species;
+#   after exporting, I will add some manual text annotations of the CDS positions & nearest gaps
+# ==============================================================================
+
+tvv_all.plot <- tvv_all.analysis.with.names %>% 
+                     ggplot(aes(x = Position,
+                                y = WindowHasGap,
+                                color = "#ef3e4a")) +
+                     geom_line(size = 0.3) +
+                     theme_classic() +
+                     theme(legend.position = "none",
+                           axis.line = element_blank(),
+                           panel.border = element_rect(size=0.5, fill=NA),
+                           axis.text.x = element_text(color = "black", angle = 45, 
+                                                      vjust = 1, hjust=1,),
+                           axis.ticks.y = element_blank(),
+                           strip.background = element_rect(color="black", fill="#DCDCDC",
+                                                           size=0.5, linetype="solid"),
+                           strip.text = element_text(color = "black", 
+                                                     family = "mono",
+                                                     face = "bold",
+                                                     size = 7)) +
+                     scale_y_continuous(expand = expansion(mult = c(0.1, 0.2)),
+                                        name = NULL,
+                                        limits = c(0.00, 1.00),
+                                        labels = NULL,
+                                        breaks = c(0,1)) +
+                     scale_x_continuous(expand = expansion(mult = c(0.010,0.010)),
+                                        name = "Alignment position",
+                                        breaks = seq(from = 0,
+                                                     to = 5200,
+                                                     by = 100),
+                                        labels = c(1,    "", "", "", "",  500, "", "", "", "",
+                                                   1000, "", "", "", "", 1500, "", "", "", "",
+                                                   2000, "", "", "", "", 2500, "", "", "", "",
+                                                   3000, "", "", "", "", 3500, "", "", "", "",
+                                                   4000, "", "", "", "", 4500, "", "", "", "",
+                                                   5000, "", ""),
+                                        limits = c(1,NA)) +
+                     geom_rect(data = select (.data = tvv_all.analysis.with.names,
+                                              Species, cds.start, cds.stop) %>% 
+                                      distinct (Species, .keep_all = TRUE), 
+                               inherit.aes = FALSE,
+                               mapping = aes(xmin=cds.start, xmax=cds.stop, 
+                                             ymin=-Inf, ymax=Inf),
+                               fill="gray", color = NA, alpha=0.33) +
+                     facet_grid(rows = vars(Species))
+
+# Show the plot
+tvv_all.plot
+```
+
+```{r save the final gap plot, eval=FALSE}
+ggsave(
+  "TVV1-5 gap plot.svg",
+  plot = tvv_all.plot,
+  device = "svg",
+  scale = 1,
+  width = 8.5,
+  height = 4.25,
+  units = "in",
+  dpi = 300
+  )
+```
+
+Figure legend for gap plot:
+
+*Fig. 1*: Trichomonasvirus gap plot. All NCBI GenBank sequences belonging to TVV1, TVV2, TVV3, or TVV4 were downloaded and, per species, aligned to the novel strains reported in this study. These alignments were analyzed for gaps corresponding to insertion or deletion events. Positions with gaps are presented as peaks. The coding sequence (CDS) of each TVV species is represented by the gray box, numbered internally with starting and ending positions. The nearest gaps on either side of the CDS are numbered in red, bolded typeface.
+
+
