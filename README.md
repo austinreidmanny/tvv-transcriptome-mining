@@ -1,3 +1,3 @@
 # tvv-transcriptome-mining
 
-This repository hosts the code used for the analysis for the manuscript "Trichomonasvirus sequences from public transcriptome data and related de novo sequencing" (Austin R. Manny et al 2021).
+This repository hosts the code used for the analysis for the manuscript "Discovery of a new species of trichomonasvirus in the human parasite Trichomonas vaginalis using transcriptome mining" (Austin R. Manny et al 2021).
