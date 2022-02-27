@@ -18,7 +18,7 @@ library("readxl")
 ```
 
 ```{r Genome-length-vs-Sequencing}
-# Load genome lengths & sequencing-related data for TVV1-4
+# Load genome lengths & sequencing-related data for TVV1-5
 tvv.data <- readxl::read_excel("../TVV1-5/TVV1-5_genome-length-vs-median-mapped-reads.xlsx")
 
 # Plot length vs median-depth 
@@ -54,7 +54,7 @@ plot.length.vs.mediandepth
 
 ```{r save-figure}
 ggsave(
-  "Figure-S1.jpeg",
+  "Figure-S2.jpeg",
   plot = plot.length.vs.mediandepth,
   device = "jpeg",
   scale = 1,
