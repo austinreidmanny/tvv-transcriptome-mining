@@ -1,5 +1,5 @@
 ---
-title: "Generating Figure S2 - RPKM varies across TVV species"
+title: "Generating Figure S3 - RPKM varies across TVV species"
 author: "Austin Reid Manny"
 date: "2021-04-09"
 output: pdf_document
@@ -19,7 +19,7 @@ table_s1 <- read_csv(file = "table-s1-summarized.csv") %>% drop_na()
 ```
 
 ```{r plot data}
-fig_s2 <- ggplot(data = table_s1,
+fig_s3 <- ggplot(data = table_s1,
                         mapping = aes(x = Species,
                                       y = RPKM)) +
                  geom_boxplot() + 
@@ -29,13 +29,13 @@ fig_s2 <- ggplot(data = table_s1,
                  theme(plot.title = element_text(hjust = 0.5, face = "bold")) +
                  stat_compare_means(label.x = 4.47, label.y = 2.1)
 
-fig_s2
+fig_s3
 ```
 
 ```{r save the plot}
 # Save it
 ggsave(
-  "FigS2 RPKM-values-by-TVV.jpeg",
+  "FigS3 RPKM-values-by-TVV.jpeg",
   plot = fig_s2,
   device = "jpeg",
   scale = 1,
