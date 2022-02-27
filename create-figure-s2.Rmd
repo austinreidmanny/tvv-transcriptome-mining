@@ -1,5 +1,5 @@
 ---
-title: "Figure S1"
+title: "Figure S2"
 author: "Austin Reid Manny"
 date: "2021-04-11"
 output: pdf_notebook
